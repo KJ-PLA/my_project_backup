@@ -1,0 +1,30 @@
+# 忽略历史记录和配置
+.bash_history
+.bashrc
+.bash_logout
+.profile
+.gitconfig
+.wget-hsts
+
+# 忽略缓存目录
+.cache/
+.conda/
+.dotnet/
+.vscode-server/
+.ssh/
+scikit_learn_data/
+gensim-data/
+
+# 忽略虚拟环境和安装包
+miniconda3/
+Miniconda3-latest-Linux-x86_64.sh
+
+# 可选：忽略 numpy 存档
+*.npy
+*.npz
+
+# 可选：忽略大型模型中间文件
+*.pt
+*.ckpt
+*.pth
+__pycache__/
