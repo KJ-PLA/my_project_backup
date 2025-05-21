@@ -11,5 +11,8 @@ preprocess = Preprocess(vocab_size=10000)
 model = FASTopic(50, preprocess, device=device)
 top_words, doc_topic_dist = model.fit_transform(docs)
 
-print("Topic Top Words:", topic_top_words)
+path = "./tmp/fastopic.zip"
+model.save(path)
+
+print("Topic Top Words:", top_words)
 print("First 5 Document Topic Distributions:", doc_topic_dist[:5])

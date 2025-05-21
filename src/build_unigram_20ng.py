@@ -1,30 +1,44 @@
-# src/build_unigram_20ng.py
-import os
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+统计 20 Newsgroups 数据集的 unigram 词频，并保存到 src/20ng_unigram.pt。
+运行方式（在项目根目录下）：
+    python src/build_unigram_20ng.py
+"""
+
 from collections import Counter
 import torch
+from sklearn.datasets import fetch_20newsgroups
+from typing import List
 
-def load_20ng(root_dir):
-    docs = []
-    for split in ("train", "test"):
-        split_dir = os.path.join(root_dir, split)
-        for fname in os.listdir(split_dir):
-            path = os.path.join(split_dir, fname)
-            with open(path, encoding="latin1") as f:
-                docs.append(f.read())
-    return docs
-
-def simple_tokenize(text):
+def simple_tokenize(text: str) -> List[str]:
+    """
+    最简单的分词：全部小写后按空白切分。
+    """
     return text.lower().split()
 
+def main():
+    print("1) 加载 20NG 数据集（去除 headers/footers/quotes）")
+    data = fetch_20newsgroups(
+        subset='all',
+        remove=('headers', 'footers', 'quotes')
+    )['data']
+
+    print("2) 分词并统计频次")
+    counter = Counter()
+    for doc in data:
+        tokens = simple_tokenize(doc)
+        counter.update(tokens)
+
+    print("3) 构造词表和频率张量")
+    vocab, freq = zip(*counter.items())
+    freq_tensor = torch.tensor(freq, dtype=torch.float32)
+
+    save_path = "src/20ng_unigram.pt"
+    print(f"4) 保存到 {save_path}")
+    torch.save({"vocab": list(vocab), "freq": freq_tensor}, save_path)
+    print(f"完成，共 {len(vocab)} 个词。")
+
 if __name__ == "__main__":
-    # TODO: 改成你本地 20NG 数据集的路径
-    corpus_root = "/path/to/20news-bydate"
-    docs = load_20ng(corpus_root)
-    cnt = Counter()
-    for doc in docs:
-        cnt.update(simple_tokenize(doc))
-    vocab, freq = zip(*cnt.items())
-    freq = torch.tensor(freq, dtype=torch.float32)
-    # 保存到 src/20ng_unigram.pt
-    torch.save((list(vocab), freq), "src/20ng_unigram.pt")
-    print("Saved unigram to src/20ng_unigram.pt")
+    main()

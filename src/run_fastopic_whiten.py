@@ -1,10 +1,17 @@
-# src/run_fastopic_whiten.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+端到端：加载词频 → 拟合白化 → 应用白化 → 训练 FASTopic → 保存/加载模型 → 评测。
+运行方式（在项目根目录下）：
+    python src/run_fastopic_whiten.py
+"""
 
 import os
 import sys
 import torch
 
-# —— 确保能 import fastopic 及 utils —— #
+# 确保能 import 根目录下的 fastopic 包和当前 src
 ROOT = os.path.abspath(os.path.dirname(__file__) + os.sep + "..")
 SRC  = os.path.abspath(os.path.dirname(__file__))
 sys.path.insert(0, ROOT)
@@ -12,96 +19,99 @@ sys.path.insert(0, SRC)
 
 from fastopic import FASTopic
 from whiten_utils import fit_whitening, whiten
+from sklearn.datasets import fetch_20newsgroups
 
-# 1. 选择设备
+# 1. 选择设备（自动检测 GPU）
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+print("使用设备:", device)
 
+# 2. 加载 unigram 词表和频率
 def load_unigram(path: str):
-    vocab, freq = torch.load(path)
-    return freq  # (V,)
+    data = torch.load(path)
+    return data["vocab"], data["freq"]
 
-class WhitenedDocEncoder:
-    """包装 FASTopic 的文档编码器，在输出后白化嵌入"""
-    def __init__(self, base_encoder, mu, P):
-        self.base = base_encoder
-        self.mu   = mu
-        self.P    = P
-
-    def encode(self, docs, show_progress_bar=False, normalize_embeddings=False, convert_to_tensor=True):
-        # 将 base_encoder 也假设已在 GPU 上
-        d = self.base.encode(
-            docs,
-            show_progress_bar=show_progress_bar,
-            normalize_embeddings=normalize_embeddings,
-            convert_to_tensor=convert_to_tensor
-        )  # d: (batch, H) on same device as model
-        # whiten 会自动在相同 device 上运算
-        return whiten(d, self.mu, self.P)
+# 3. 从本地文件夹加载 20NG train/test 文档列表
+def load_20ng_split(corpus_root: str, split: str) -> list[str]:
+    texts = []
+    split_dir = os.path.join(corpus_root, split)
+    for cat in os.listdir(split_dir):
+        cat_dir = os.path.join(split_dir, cat)
+        if not os.path.isdir(cat_dir):
+            continue
+        for fname in os.listdir(cat_dir):
+            path = os.path.join(cat_dir, fname)
+            with open(path, encoding="latin1") as f:
+                texts.append(f.read())
+    return texts
 
 def main():
-    # ———— 2. 初始化并移动 FASTopic 到 GPU ————
+    # 路径设置：根据本地实际修改 corpus_root
+    unigram_path = "src/20ng_unigram.pt"
+    corpus_root  = "data/20news-bydate"  # 请改成你本地解压路径
+
+    # 4. 初始化 FASTopic 并搬到设备
     model = FASTopic(num_topics=50).to(device)
 
-    # ———— 3. 加载 20NG 词频 ————
-    freq = load_unigram("src/20ng_unigram.pt").to(device)  # (V,)
+    # 5. 加载并归一化频率，搬到设备
+    vocab, freq = load_unigram(unigram_path)
+    freq = freq.to(device)
 
-    # ———— 4. 拟合白化 μ, P —— (在 CPU 上也可，但我们直接在 GPU 上做) ————
-    W0 = model.word_emb.weight.data             # (V, H)
-    mu, P = fit_whitening(W0, freq, topk=200_000)  # 返回 CPU 张量
-    # 搬到 GPU
-    mu = mu.to(device)
-    P  = P.to(device)
+    # 6. 拟合白化参数 (仅基于词嵌入)
+    W0 = model.word_emb.weight.data.to(device)    # 词嵌入 (V, H)
+    mu, P = fit_whitening(W0, freq, topk=200_000)
+    mu, P = mu.to(device), P.to(device)
 
-    # ———— 5. 白化并替换 词向量 & 主题向量 ———
-    # 把原始权重也移动到 device
-    W0 = model.word_emb.weight.data.to(device)
+    # 7. 白化并替换 词嵌入 & 主题嵌入
     W_white = whiten(W0, mu, P)
     model.word_emb.weight.data.copy_(W_white)
 
-    T0 = model.topic_emb.weight.data.to(device)  # (K, H)
+    T0 = model.topic_emb.weight.data.to(device)   # 主题向量 (K, H)
     T_white = whiten(T0, mu, P)
     model.topic_emb.weight.data.copy_(T_white)
 
-    # ———— 6. 包装并移动文档编码器 ———
-    # 如果 doc_embed_model 里有 .to，先调用 .to(device)
+    # 8. 包装文档编码器，使其输出也做白化
+    class WhitenedDocEncoder:
+        def __init__(self, base, mu, P):
+            self.base = base
+            self.mu   = mu
+            self.P    = P
+        def encode(self, docs, **kw):
+            d = self.base.encode(docs, **kw)    # (B, H)
+            return whiten(d, self.mu, self.P)
+
+    # 将编码器搬到设备（若支持 .to() 方法）
     try:
         model.doc_embed_model.to(device)
-    except AttributeError:
+    except:
         pass
-    # 用 GPU 上的 mu, P 来包装
-    model.doc_embed_model = WhitenedDocEncoder(
-        model.doc_embed_model, mu, P
-    )
+    model.doc_embed_model = WhitenedDocEncoder(model.doc_embed_model, mu, P)
 
-    # ———— 7. 准备训练/测试数据 ————
-    # 请根据实际需求实现 load_20ng_split
-    def load_20ng_split(corpus_root: str, split: str) -> list[str]:
-        texts = []
-        split_dir = os.path.join(corpus_root, split)
-        for category in os.listdir(split_dir):
-            cat_dir = os.path.join(split_dir, category)
-            if not os.path.isdir(cat_dir):
-                continue
-            for fname in os.listdir(cat_dir):
-                path = os.path.join(cat_dir, fname)
-                with open(path, encoding="latin1") as f:
-                    texts.append(f.read())
-        return texts
-
-    corpus_root = "/data/20news-bydate"  # 修改为你的路径
+    # 9. 加载 20NG train/test 文档
     train_docs = load_20ng_split(corpus_root, "train")
     test_docs  = load_20ng_split(corpus_root, "test")
 
-    # ———— 8. 训练 & 评测 ———
+    # 10. 训练 & 保存模型
+    print("开始训练 FASTopic …")
     model.fit(train_docs, epochs=10)
-    print("Top words per topic:")
-    for k, words in enumerate(model.get_topic_words(topk=10)):
-        print(f"Topic {k:02d}:", words)
 
-    print("Doc-topic distributions on test set:")
-    theta = model.get_doc_topic_distribution(test_docs)
-    print(theta)
+    save_path = "fastopic_whitened.zip"
+    print("保存模型到", save_path)
+    model.save(save_path)
+
+    # 11. 从磁盘加载并评测
+    print("加载并评测已保存模型 …")
+    loaded = FASTopic.from_pretrained(save_path).to(device)
+    # 获取主题-词分布 β
+    beta = loaded.get_beta()
+    print("β 矩阵形状:", beta.shape)
+
+    # 新文档推断
+    doc_topic = loaded.transform(test_docs[:5])
+    print("前 5 篇测试文档的主题分布:\n", doc_topic)
+
+    # 继续微调 / 增量训练
+    print("继续训练 1 轮 …")
+    loaded.fit_transform(train_docs, epochs=1)
 
 if __name__ == "__main__":
     main()
